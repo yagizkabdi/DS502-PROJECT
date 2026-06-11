@@ -1,3 +1,5 @@
+import time
+
 import gurobipy as gp
 from gurobipy import GRB
 
@@ -49,13 +51,10 @@ def build_and_solve_mip(inst, time_limit=60, verbose=False):
                     tp = t + dt
                     if tp >= L:
                         break
-                    for ip in I_types:
-                        if ip == none_idx:
-                            continue
-                        m.addConstr(
-                            x[k, i, t] + x[k, ip, tp] <= 1,
-                            name=f"defer_{k}_{t}_{i}_{tp}_{ip}",
-                        )
+                    m.addConstr(
+                        x[k, i, t] <= x[k, none_idx, tp],
+                        name=f"defer_{k}_{t}_{i}_{tp}",
+                    )
 
     for j in J:
         for t in T:
@@ -87,10 +86,31 @@ def build_and_solve_mip(inst, time_limit=60, verbose=False):
                 name=f"shelf_{j}_{t}",
             )
 
+    cpu0 = time.process_time()
     m.optimize()
+    cpu_runtime = time.process_time() - cpu0
 
-    if m.Status not in (GRB.OPTIMAL, GRB.TIME_LIMIT):
-        return {"status": m.Status, "obj": None, "schedule": None}
+    has_solution = m.SolCount > 0
+    try:
+        obj_bound = m.ObjBound
+    except (gp.GurobiError, AttributeError):
+        obj_bound = None
+    try:
+        mip_gap = m.MIPGap if has_solution else None
+    except (gp.GurobiError, AttributeError):
+        mip_gap = None
+
+    base = {
+        "status": m.Status,
+        "runtime": m.Runtime,
+        "cpu_runtime": cpu_runtime,
+        "obj_bound": obj_bound,
+        "mip_gap": mip_gap,
+    }
+
+    if not has_solution:
+        base.update({"obj": None, "schedule": None})
+        return base
 
     schedule = {}
     for k in K:
@@ -106,23 +126,30 @@ def build_and_solve_mip(inst, time_limit=60, verbose=False):
     inv = {(j, t): Iv[j, t].X for j in J for t in T}
     disp = {(j, t): Pv[j, t].X for j in J for t in T}
 
-    return {
-        "status": m.Status,
+    base.update({
         "obj": m.ObjVal,
         "schedule": schedule,
         "inventory": inv,
         "disposal": disp,
-        "runtime": m.Runtime,
-    }
+    })
+    return base
 
 
 def print_result(inst, res):
     if res["obj"] is None:
         print("MIP did not return a solution. Status:", res["status"])
+        if res.get("obj_bound") is not None:
+            print(f"best bound : {res['obj_bound']:.2f}")
         return
     print(f"MIP status : {res['status']}")
     print(f"objective  : {res['obj']:.2f}")
-    print(f"runtime    : {res['runtime']:.3f}s")
+    if res.get("obj_bound") is not None:
+        print(f"best bound : {res['obj_bound']:.2f}")
+    if res.get("mip_gap") is not None:
+        print(f"opt. gap   : {res['mip_gap'] * 100:.4f}%")
+    print(f"runtime    : {res['runtime']:.3f}s (wall)")
+    if res.get("cpu_runtime") is not None:
+        print(f"cpu time   : {res['cpu_runtime']:.3f}s")
     names = inst["donation_names"]
     print("donor schedules:")
     for k, sch in res["schedule"].items():
